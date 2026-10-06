@@ -10,7 +10,7 @@ Clone the repository:
 
 ```bash
 git clone https://github.com/knight109/netcert.git
-cd REPOSITORY
+cd netcert
 chmod +x netcert
 ./netcert --help
 ```
