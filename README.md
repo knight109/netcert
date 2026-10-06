@@ -9,8 +9,8 @@ Requires Python 3.10 or newer. Uses only the Python standard library; no package
 Clone the repository:
 
 ```bash
-git clone https://github.com/USERNAME/REPOSITORY.git
-cd REPOSITORY
+git clone https://github.com/knight109/netcert.git
+cd netcert
 chmod +x netcert
 ./netcert --help
 ```
@@ -34,27 +34,6 @@ You can now run:
 ```bash
 netcert --help
 ```
-
-Update netcert:
-```bash
-cd netcert
-git pull
-```
-
-## Examples
-
-```bash
-# Find known subdomains from public Certificate Transparency logs
-netcert --subdomains -u example.com
-
-# Save the discovered subdomains as JSON
-netcert --subdomains -u example.com --json --save subdomains.json
-
-# Check several websites; progress is shown for each target
-netcert --status -l sites.txt
-```
-
-Subdomain discovery queries [crt.sh](https://crt.sh/) and reports names found in public certificate logs. It requires an internet connection and may not find every subdomain; results are not guaranteed to be active.
 
 ## Options
 
