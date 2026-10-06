@@ -9,7 +9,7 @@ Requires Python 3.10 or newer. Uses only the Python standard library; no package
 Clone the repository:
 
 ```bash
-git clone https://github.com/USERNAME/REPOSITORY.git
+git clone https://github.com/knight109/netcert.git
 cd REPOSITORY
 chmod +x netcert
 ./netcert --help
