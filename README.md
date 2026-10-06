@@ -4,6 +4,28 @@ A lightweight command-line tool for checking and inventorying websites you manag
 
 Requires Python 3.10 or newer. Uses only the Python standard library; no packages to install.
 
+## Download
+
+Clone the repository:
+
+```bash
+git clone https://github.com/USERNAME/REPOSITORY.git
+cd REPOSITORY
+```
+
+Or, if you only want the `netcert` file, download it directly from the repository and make it executable:
+
+```bash
+chmod +x netcert
+```
+
+Then run:
+
+```bash
+./netcert --help
+```
+
+
 ## Run
 
 To run it directly from the project directory:
@@ -28,31 +50,6 @@ If `netcert` is not found, add `~/.local/bin` to your `PATH` for the current she
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Examples
-
-```bash
-# Resolve IPv4 and IPv6 addresses
-netcert --ip -u example.com
-
-# Check availability for a list of websites
-netcert --availability -l sites.txt
-
-# Show basic DNS information
-netcert --dns -u example.com
-
-# Collect certificates and write one summary file
-netcert --ssl -l sites.txt --store ./certificates --summary
-
-# Run the combined health check
-netcert --status -l sites.txt
-
-# Save IP results as JSON or CSV
-netcert --ip -l sites.txt --json --save ips.json
-netcert --ip -l sites.txt --csv --save ips.csv
-```
-
-A target can be a domain, IP address, or `http://` or `https://` URL. A list file contains one target per line; blank lines and lines beginning with `#` are ignored.
-
 ## Options
 
 | Option | Description |
@@ -71,10 +68,3 @@ A target can be a domain, IP address, or `http://` or `https://` URL. A list fil
 | `--csv` | Format output as CSV. Cannot be combined with `--json`. |
 | `-h`, `--help` | Show help and examples. |
 | `-v`, `--version` | Show the version. |
-
-## Notes
-
-- Select exactly one function per command.
-- `--ssl` requires `--store`; `--summary` is only valid with `--ssl`.
-- IP and basic DNS results use the operating system's resolver. DNS output is not a full record lookup for types such as MX or TXT.
-- Only run checks against websites you own or are authorized to monitor.
