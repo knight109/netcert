@@ -35,6 +35,12 @@ You can now run:
 netcert --help
 ```
 
+Update
+```bash
+cd netcert
+git pull
+```
+
 ## Options
 
 | Option                 | Description                                                                                       |
