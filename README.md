@@ -40,25 +40,3 @@ Update
 cd netcert
 git pull
 ```
-
-## Options
-
-| Option                 | Description                                                                                       |
-| ---------------------- | ------------------------------------------------------------------------------------------------- |
-| `-u`, `--url URL`      | Check one target.                                                                                 |
-| `-l`, `--list FILE`    | Read targets from a text file. Use either `-u` or `-l`.                                           |
-| `-i`, `--ip`           | Resolve and display all available IPv4 and IPv6 addresses.                                        |
-| `--ip4`                | Show only IPv4 addresses.                                                                          |
-| `--ip6`                | Show only IPv6 addresses.                                                                          |
-| `-a`, `--availability` | Check website reachability and report HTTP status and response time.                              |
-| `--dns`                | Show resolved addresses, canonical name, and reverse DNS names when available.                    |
-| `--subdomains`         | Find known subdomains in public Certificate Transparency logs. Use `--save` to save results.      |
-| `--ssl`                | Collect the site's peer certificate as a PEM file. Requires `--store`.                            |
-| `--status`             | Check IP addresses, availability, and verified SSL health. Does not save certificates.            |
-| `--store DIRECTORY`    | Directory for collected PEM files; only valid with `--ssl`.                                       |
-| `--summary`            | With `--ssl`, write one `summary.txt` in the store directory.                                     |
-| `--save [FILE]`        | Save formatted output to a file. Without a filename, uses a default name. Output is also printed. |
-| `--json`               | Format output as JSON. Cannot be combined with `--csv`.                                           |
-| `--csv`                | Format output as CSV. Cannot be combined with `--json`.                                           |
-| `-h`, `--help`         | Show help and examples.                                                                           |
-| `-v`, `--version`      | Show the version.                                                                                 |
