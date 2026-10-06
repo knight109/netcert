@@ -35,6 +35,27 @@ You can now run:
 netcert --help
 ```
 
+Update netcert:
+```bash
+cd netcert
+git pull
+```
+
+## Examples
+
+```bash
+# Find known subdomains from public Certificate Transparency logs
+netcert --subdomains -u example.com
+
+# Save the discovered subdomains as JSON
+netcert --subdomains -u example.com --json --save subdomains.json
+
+# Check several websites; progress is shown for each target
+netcert --status -l sites.txt
+```
+
+Subdomain discovery queries [crt.sh](https://crt.sh/) and reports names found in public certificate logs. It requires an internet connection and may not find every subdomain; results are not guaranteed to be active.
+
 ## Options
 
 | Option                 | Description                                                                                       |
@@ -44,6 +65,7 @@ netcert --help
 | `-i`, `--ip`           | Resolve all available IPv4 and IPv6 addresses.                                                    |
 | `-a`, `--availability` | Check website reachability and report HTTP status and response time.                              |
 | `--dns`                | Show resolved addresses, canonical name, and reverse DNS names when available.                    |
+| `--subdomains`         | Find known subdomains in public Certificate Transparency logs. Use `--save` to save results.      |
 | `--ssl`                | Collect the site's peer certificate as a PEM file. Requires `--store`.                            |
 | `--status`             | Check IP addresses, availability, and verified SSL health. Does not save certificates.            |
 | `--store DIRECTORY`    | Directory for collected PEM files; only valid with `--ssl`.                                       |

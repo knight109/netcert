@@ -8,6 +8,7 @@ import csv
 import datetime as dt
 import ipaddress
 import json
+import re
 import socket
 import ssl
 import sys
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.1.0"
+VERSION = "0.1.2"
 TIMEOUT_SECONDS = 8
 
 
@@ -36,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
 			"  netcert --ip -u example.com\n"
 			"  netcert -a -l sites.txt --json\n"
 			"  netcert --dns -l sites.txt --save dns.json --json\n"
+			"  netcert --subdomains -u example.com --save\n"
 			"  netcert --ssl -l sites.txt --store ./certificates --summary\n"
 			"  netcert --status -l sites.txt --csv --save health.csv"
 		),
@@ -49,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 	functions.add_argument("-i", "--ip", action="store_true", help="resolve all IPv4 and IPv6 addresses")
 	functions.add_argument("-a", "--availability", action="store_true", help="check whether the website responds")
 	functions.add_argument("--dns", action="store_true", help="show resolved addresses, canonical name, and PTR names")
+	functions.add_argument("--subdomains", action="store_true", help="find known subdomains in public Certificate Transparency logs")
 	functions.add_argument("--ssl", action="store_true", help="collect peer certificates as PEM files")
 	functions.add_argument("--status", action="store_true", help="show IP, availability, and SSL health")
 
@@ -150,6 +153,44 @@ def dns_information(host: str) -> dict[str, Any]:
 		except (OSError, socket.herror, socket.gaierror):
 			continue
 	return info
+
+
+def find_subdomains(host: str) -> list[str]:
+	base_domain = host.rstrip(".").encode("idna").decode("ascii").lower()
+	try:
+		ipaddress.ip_address(base_domain)
+	except ValueError:
+		pass
+	else:
+		raise ValueError("subdomain discovery requires a domain name, not an IP address")
+	query = urllib.parse.urlencode({"q": f"%.{base_domain}", "output": "json"})
+	url = f"https://crt.sh/?{query}"
+	request = urllib.request.Request(url, headers={"User-Agent": f"netcert/{VERSION}"})
+	with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+		entries = json.loads(response.read().decode("utf-8"))
+	if not isinstance(entries, list):
+		raise ValueError("Certificate Transparency service returned an unexpected response")
+
+	labels = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+	subdomains: set[str] = set()
+	for entry in entries:
+		if not isinstance(entry, dict):
+			continue
+		name_value = entry.get("name_value")
+		if not isinstance(name_value, str):
+			continue
+		for name in name_value.splitlines():
+			candidate = name.strip().lower().removeprefix("*.").rstrip(".")
+			try:
+				candidate = candidate.encode("idna").decode("ascii")
+			except UnicodeError:
+				continue
+			if candidate == base_domain or not candidate.endswith(f".{base_domain}"):
+				continue
+			if len(candidate) > 253 or not all(labels.fullmatch(label) for label in candidate.split(".")):
+				continue
+			subdomains.add(candidate)
+	return sorted(subdomains)
 
 
 def availability(target: dict[str, Any]) -> dict[str, Any]:
@@ -276,6 +317,9 @@ def run_target(mode: str, target: dict[str, Any], store: Path | None) -> dict[st
 				result.update(dns_information(host))
 			else:
 				result["addresses"] = resolve_addresses(host)
+		if mode == "subdomains":
+			result["subdomains"] = find_subdomains(host)
+			result["source"] = "crt.sh Certificate Transparency logs"
 		if mode in ("availability", "status"):
 			result.update(availability(target))
 		if mode == "ssl":
@@ -299,6 +343,11 @@ def format_text(mode: str, results: list[dict[str, Any]]) -> str:
 			output.append(f"  Canonical    : {result.get('canonical_name') or 'Unavailable'}")
 			ptr = result.get("ptr", {})
 			output.append(f"  PTR          : {', '.join(f'{ip}={name}' for ip, name in ptr.items()) or 'Unavailable'}")
+		elif mode == "subdomains":
+			subdomains = result.get("subdomains", [])
+			output.append(f"  Subdomains   : {len(subdomains)} found")
+			output.extend(f"    {name}" for name in subdomains)
+			output.append(f"  Source       : {result.get('source', 'Certificate Transparency logs')}")
 		if mode in ("availability", "status"):
 			output.append(f"  Availability : {result.get('availability', 'DOWN')}")
 			if result.get("http_status") is not None:
@@ -323,6 +372,8 @@ CSV_FIELDS = (
 	"addresses",
 	"canonical_name",
 	"ptr",
+	"subdomains",
+	"source",
 	"availability",
 	"http_status",
 	"response_ms",
@@ -350,6 +401,8 @@ def format_output(mode: str, output_format: str, results: list[dict[str, Any]]) 
 				row["addresses"] = ";".join(row["addresses"])
 			if isinstance(row.get("ptr"), dict):
 				row["ptr"] = ";".join(f"{ip}={name}" for ip, name in row["ptr"].items())
+			if isinstance(row.get("subdomains"), list):
+				row["subdomains"] = ";".join(row["subdomains"])
 			writer.writerow(row)
 		return stream.getvalue()
 	return format_text(mode, results)
@@ -358,7 +411,10 @@ def format_output(mode: str, output_format: str, results: list[dict[str, Any]]) 
 def main(argv: list[str] | None = None) -> int:
 	parser = build_parser()
 	args = parser.parse_args(argv)
-	mode = "ip" if args.ip else "availability" if args.availability else "dns" if args.dns else "ssl" if args.ssl else "status"
+	mode = (
+		"ip" if args.ip else "availability" if args.availability else "dns" if args.dns
+		else "subdomains" if args.subdomains else "ssl" if args.ssl else "status"
+	)
 	if args.ssl and not args.store:
 		parser.error("--ssl requires --store DIRECTORY")
 	if args.summary and not args.ssl:
@@ -379,7 +435,11 @@ def main(argv: list[str] | None = None) -> int:
 		except OSError as exc:
 			parser.error(f"cannot create certificate directory {str(store)!r}: {exc}")
 
-	results = [run_target(mode, target, store) for target in targets]
+	results: list[dict[str, Any]] = []
+	for index, target in enumerate(targets, start=1):
+		print(f"[{index}/{len(targets)}] Checking {target['target']}...", end="", file=sys.stderr, flush=True)
+		results.append(run_target(mode, target, store))
+		print(" done", file=sys.stderr, flush=True)
 	if args.summary:
 		assert store is not None
 		summary = "".join(
