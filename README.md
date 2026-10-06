@@ -47,7 +47,9 @@ git pull
 | ---------------------- | ------------------------------------------------------------------------------------------------- |
 | `-u`, `--url URL`      | Check one target.                                                                                 |
 | `-l`, `--list FILE`    | Read targets from a text file. Use either `-u` or `-l`.                                           |
-| `-i`, `--ip`           | Resolve all available IPv4 and IPv6 addresses.                                                    |
+| `-i`, `--ip`           | Resolve and display all available IPv4 and IPv6 addresses.                                        |
+| `--ip4`                | Show only IPv4 addresses.                                                                          |
+| `--ip6`                | Show only IPv6 addresses.                                                                          |
 | `-a`, `--availability` | Check website reachability and report HTTP status and response time.                              |
 | `--dns`                | Show resolved addresses, canonical name, and reverse DNS names when available.                    |
 | `--subdomains`         | Find known subdomains in public Certificate Transparency logs. Use `--save` to save results.      |
