@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+"""Inventory websites you own or are authorized to monitor."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import ipaddress
+import json
+import socket
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+
+VERSION = "0.1.0"
+TIMEOUT_SECONDS = 8
+
+
+def build_parser() -> argparse.ArgumentParser:
+	parser = argparse.ArgumentParser(
+		prog="netcert",
+		description=(
+			"Check and inventory websites that you manage or are authorized "
+			"to monitor. This is an office maintenance tool, not a "
+			"vulnerability scanner."
+		),
+		epilog=(
+			"Examples:\n"
+			"  netcert --ip -u example.com\n"
+			"  netcert -a -l sites.txt --json\n"
+			"  netcert --dns -l sites.txt --save dns.json --json\n"
+			"  netcert --ssl -l sites.txt --store ./certificates --summary\n"
+			"  netcert --status -l sites.txt --csv --save health.csv"
+		),
+		formatter_class=argparse.RawDescriptionHelpFormatter,
+	)
+	targets = parser.add_mutually_exclusive_group(required=True)
+	targets.add_argument("-u", "--url", metavar="URL", help="one URL or domain")
+	targets.add_argument("-l", "--list", metavar="FILE", help="file with one target per line")
+
+	functions = parser.add_mutually_exclusive_group(required=True)
+	functions.add_argument("-i", "--ip", action="store_true", help="resolve all IPv4 and IPv6 addresses")
+	functions.add_argument("-a", "--availability", action="store_true", help="check whether the website responds")
+	functions.add_argument("--dns", action="store_true", help="show resolved addresses, canonical name, and PTR names")
+	functions.add_argument("--ssl", action="store_true", help="collect peer certificates as PEM files")
+	functions.add_argument("--status", action="store_true", help="show IP, availability, and SSL health")
+
+	parser.add_argument("--store", metavar="DIRECTORY", help="directory for collected SSL certificate files")
+	parser.add_argument("--summary", action="store_true", help="write one summary.txt in the certificate directory")
+	parser.add_argument(
+		"--save",
+		nargs="?",
+		const="",
+		metavar="FILE",
+		help="save normal output (default filename depends on function and format)",
+	)
+	formats = parser.add_mutually_exclusive_group()
+	formats.add_argument("--json", dest="output_format", action="store_const", const="json", help="print output as JSON")
+	formats.add_argument("--csv", dest="output_format", action="store_const", const="csv", help="print output as CSV")
+	parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {VERSION}")
+	return parser
+
+
+def parse_target(value: str) -> dict[str, Any]:
+	value = value.strip()
+	if not value:
+		raise ValueError("target is empty")
+	try:
+		address = ipaddress.ip_address(value)
+	except ValueError:
+		address = None
+	if address is not None:
+		return {"target": address.compressed, "host": address.compressed, "scheme": None, "port": None, "path": "/"}
+	parsed = urllib.parse.urlsplit(value if "://" in value else f"//{value}")
+	if parsed.scheme and parsed.scheme not in ("http", "https"):
+		raise ValueError("only http and https URLs are supported")
+	host = parsed.hostname
+	if not host:
+		raise ValueError("target must be a hostname or URL with a hostname")
+	try:
+		port = parsed.port
+	except ValueError as exc:
+		raise ValueError(f"invalid port: {exc}") from exc
+	scheme = parsed.scheme.lower() if parsed.scheme else None
+	path = parsed.path or "/"
+	if parsed.query:
+		path += f"?{parsed.query}"
+	return {
+		"target": host,
+		"host": host.encode("idna").decode("ascii"),
+		"scheme": scheme,
+		"port": port,
+		"path": path,
+	}
+
+
+def read_targets(args: argparse.Namespace) -> list[dict[str, Any]]:
+	if args.url:
+		lines = [args.url]
+	else:
+		try:
+			lines = Path(args.list).read_text(encoding="utf-8").splitlines()
+		except OSError as exc:
+			raise ValueError(f"cannot read target list {args.list!r}: {exc}") from exc
+
+	targets: list[dict[str, Any]] = []
+	for line_number, line in enumerate(lines, start=1):
+		value = line.strip()
+		if not value or value.startswith("#"):
+			continue
+		try:
+			targets.append(parse_target(value))
+		except ValueError as exc:
+			raise ValueError(f"invalid target on line {line_number}: {exc}") from exc
+	if not targets:
+		raise ValueError("no targets found")
+	return targets
+
+
+def resolve_addresses(host: str) -> list[str]:
+	try:
+		address = ipaddress.ip_address(host)
+		return [address.compressed]
+	except ValueError:
+		pass
+	records = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+	addresses = {record[4][0].split("%", 1)[0] for record in records}
+	return sorted(addresses, key=lambda item: (ipaddress.ip_address(item).version, int(ipaddress.ip_address(item))))
+
+
+def dns_information(host: str) -> dict[str, Any]:
+	info: dict[str, Any] = {"addresses": resolve_addresses(host), "canonical_name": None, "ptr": {}}
+	try:
+		canonical = socket.gethostbyname_ex(host)[0]
+		info["canonical_name"] = canonical if canonical != host else None
+	except (OSError, socket.gaierror):
+		pass
+	for address in info["addresses"]:
+		try:
+			ptr_name = socket.gethostbyaddr(address)[0]
+			if ptr_name:
+				info["ptr"][address] = ptr_name
+		except (OSError, socket.herror, socket.gaierror):
+			continue
+	return info
+
+
+def availability(target: dict[str, Any]) -> dict[str, Any]:
+	host = target["host"]
+	host_for_url = f"[{host}]" if ":" in host else host
+	path = target["path"]
+	preferred_scheme = target["scheme"] or "https"
+	schemes = [preferred_scheme]
+	if target["scheme"] is None:
+		schemes.append("http")
+
+	last_error = "connection failed"
+	for scheme in schemes:
+		port = target["port"] or (443 if scheme == "https" else 80)
+		default_port = 443 if scheme == "https" else 80
+		netloc = host_for_url if port == default_port else f"{host_for_url}:{port}"
+		url = f"{scheme}://{netloc}{path}"
+		request = urllib.request.Request(url, headers={"User-Agent": f"netcert/{VERSION}"}, method="GET")
+		started = time.perf_counter()
+		try:
+			with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+				return {
+					"availability": "UP",
+					"http_status": response.status,
+					"response_ms": round((time.perf_counter() - started) * 1000),
+					"checked_url": url,
+				}
+		except urllib.error.HTTPError as exc:
+			return {
+				"availability": "UP",
+				"http_status": exc.code,
+				"response_ms": round((time.perf_counter() - started) * 1000),
+				"checked_url": url,
+			}
+		except (urllib.error.URLError, TimeoutError, OSError) as exc:
+			last_error = str(getattr(exc, "reason", exc))
+	return {"availability": "DOWN", "http_status": None, "response_ms": None, "error": last_error}
+
+
+def certificate_details(der_certificate: bytes) -> dict[str, Any]:
+	pem_certificate = ssl.DER_cert_to_PEM_cert(der_certificate)
+	details: dict[str, Any] = {"pem": pem_certificate, "not_before": None, "expires": None}
+	import tempfile
+
+	with tempfile.NamedTemporaryFile(mode="w", encoding="ascii", suffix=".pem") as temporary:
+		temporary.write(pem_certificate)
+		temporary.flush()
+		decoded = ssl._ssl._test_decode_cert(temporary.name)
+	for key, output_key in (("notBefore", "not_before"), ("notAfter", "expires")):
+		value = decoded.get(key)
+		if value:
+			parsed = dt.datetime.strptime(value, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=dt.timezone.utc)
+			details[output_key] = parsed.date().isoformat()
+	return details
+
+
+def fetch_certificate(host: str, port: int, verify: bool) -> bytes:
+	context = ssl.create_default_context() if verify else ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+	if not verify:
+		context.check_hostname = False
+		context.verify_mode = ssl.CERT_NONE
+	with socket.create_connection((host, port), timeout=TIMEOUT_SECONDS) as raw_socket:
+		with context.wrap_socket(raw_socket, server_hostname=host) as tls_socket:
+			certificate = tls_socket.getpeercert(binary_form=True)
+	if not certificate:
+		raise ssl.SSLError("server did not provide a certificate")
+	return certificate
+
+
+def collect_certificate(target: dict[str, Any], store: Path, verify: bool = False) -> dict[str, Any]:
+	host = target["host"]
+	port = target["port"] or 443
+	certificate = fetch_certificate(host, port, verify)
+	details = certificate_details(certificate)
+	filename_host = host.replace(":", "_")
+	certificate_path = store / f"{filename_host}.pem"
+	certificate_path.write_text(details.pop("pem"), encoding="ascii")
+	now = dt.datetime.now(dt.timezone.utc).date().isoformat()
+	not_before = details.get("not_before")
+	expires = details.get("expires")
+	date_valid = bool(not_before and expires and not_before <= now <= expires)
+	return {
+		"certificate": str(certificate_path),
+		"not_before": not_before,
+		"expires": expires,
+		"ssl": "VALID" if verify and date_valid else "INVALID" if verify else ("VALID" if date_valid else "EXPIRED/UNKNOWN"),
+	}
+
+
+def certificate_status(host: str, port: int) -> dict[str, Any]:
+	try:
+		certificate = fetch_certificate(host, port, verify=True)
+		verified = True
+		verification_error = None
+	except (OSError, ssl.SSLError, ValueError) as exc:
+		verification_error = str(exc)
+		try:
+			certificate = fetch_certificate(host, port, verify=False)
+			verified = False
+		except (OSError, ssl.SSLError, ValueError) as cert_error:
+			return {"ssl": "UNAVAILABLE", "ssl_error": str(cert_error)}
+
+	details = certificate_details(certificate)
+	now = dt.datetime.now(dt.timezone.utc).date().isoformat()
+	not_before = details.get("not_before")
+	expires = details.get("expires")
+	date_valid = bool(not_before and expires and not_before <= now <= expires)
+	result = {
+		"ssl": "VALID" if verified and date_valid else "INVALID",
+		"not_before": not_before,
+		"expires": expires,
+	}
+	if verification_error:
+		result["ssl_error"] = verification_error
+	return result
+
+
+def run_target(mode: str, target: dict[str, Any], store: Path | None) -> dict[str, Any]:
+	result: dict[str, Any] = {"target": target["target"]}
+	host = target["host"]
+	try:
+		if mode in ("ip", "dns", "status"):
+			if mode == "dns":
+				result.update(dns_information(host))
+			else:
+				result["addresses"] = resolve_addresses(host)
+		if mode in ("availability", "status"):
+			result.update(availability(target))
+		if mode == "ssl":
+			assert store is not None
+			result.update(collect_certificate(target, store))
+		elif mode == "status":
+			result.update(certificate_status(host, target["port"] or 443))
+	except (OSError, socket.gaierror, ssl.SSLError, ValueError) as exc:
+		result["error"] = str(exc)
+	return result
+
+
+def format_text(mode: str, results: list[dict[str, Any]]) -> str:
+	output: list[str] = []
+	for result in results:
+		output.append(result["target"])
+		if mode in ("ip", "status"):
+			output.append(f"  IP           : {', '.join(result.get('addresses', [])) or 'Unavailable'}")
+		elif mode == "dns":
+			output.append(f"  Addresses    : {', '.join(result.get('addresses', [])) or 'Unavailable'}")
+			output.append(f"  Canonical    : {result.get('canonical_name') or 'Unavailable'}")
+			ptr = result.get("ptr", {})
+			output.append(f"  PTR          : {', '.join(f'{ip}={name}' for ip, name in ptr.items()) or 'Unavailable'}")
+		if mode in ("availability", "status"):
+			output.append(f"  Availability : {result.get('availability', 'DOWN')}")
+			if result.get("http_status") is not None:
+				output.append(f"  HTTP Status  : {result['http_status']}")
+			if result.get("response_ms") is not None:
+				output.append(f"  Response     : {result['response_ms']} ms")
+		if mode in ("ssl", "status"):
+			output.append(f"  SSL          : {result.get('ssl', 'UNAVAILABLE')}")
+			if result.get("expires"):
+				output.append(f"  Expires      : {result['expires']}")
+			if result.get("certificate"):
+				output.append(f"  Certificate  : {result['certificate']}")
+		if result.get("error"):
+			output.append(f"  Error        : {result['error']}")
+		if result.get("ssl_error"):
+			output.append(f"  SSL Error    : {result['ssl_error']}")
+	return "\n".join(output) + "\n"
+
+
+CSV_FIELDS = (
+	"target",
+	"addresses",
+	"canonical_name",
+	"ptr",
+	"availability",
+	"http_status",
+	"response_ms",
+	"ssl",
+	"not_before",
+	"expires",
+	"certificate",
+	"error",
+	"ssl_error",
+)
+
+
+def format_output(mode: str, output_format: str, results: list[dict[str, Any]]) -> str:
+	if output_format == "json":
+		return json.dumps({"mode": mode, "results": results}, indent=2) + "\n"
+	if output_format == "csv":
+		from io import StringIO
+
+		stream = StringIO(newline="")
+		writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS, extrasaction="ignore")
+		writer.writeheader()
+		for result in results:
+			row = dict(result)
+			if isinstance(row.get("addresses"), list):
+				row["addresses"] = ";".join(row["addresses"])
+			if isinstance(row.get("ptr"), dict):
+				row["ptr"] = ";".join(f"{ip}={name}" for ip, name in row["ptr"].items())
+			writer.writerow(row)
+		return stream.getvalue()
+	return format_text(mode, results)
+
+
+def main(argv: list[str] | None = None) -> int:
+	parser = build_parser()
+	args = parser.parse_args(argv)
+	mode = "ip" if args.ip else "availability" if args.availability else "dns" if args.dns else "ssl" if args.ssl else "status"
+	if args.ssl and not args.store:
+		parser.error("--ssl requires --store DIRECTORY")
+	if args.summary and not args.ssl:
+		parser.error("--summary can only be used with --ssl")
+	if args.store and not args.ssl:
+		parser.error("--store can only be used with --ssl")
+
+	try:
+		targets = read_targets(args)
+	except ValueError as exc:
+		parser.error(str(exc))
+
+	store: Path | None = None
+	if args.ssl:
+		store = Path(args.store)
+		try:
+			store.mkdir(parents=True, exist_ok=True)
+		except OSError as exc:
+			parser.error(f"cannot create certificate directory {str(store)!r}: {exc}")
+
+	results = [run_target(mode, target, store) for target in targets]
+	if args.summary:
+		assert store is not None
+		summary = "".join(
+			f"{item['target']} | issued on: {item.get('not_before') or 'unknown'} | expired on: {item.get('expires') or 'unknown'}\n"
+			for item in results
+		)
+		try:
+			(store / "summary.txt").write_text(summary, encoding="utf-8")
+		except OSError as exc:
+			parser.error(f"cannot write certificate summary: {exc}")
+
+	output = format_output(mode, args.output_format or "text", results)
+	if args.save is not None:
+		default_extension = "json" if args.output_format == "json" else "csv" if args.output_format == "csv" else "txt"
+		default_name = f"{mode}.{default_extension}"
+		output_path = Path(args.save or default_name)
+		try:
+			output_path.write_text(output, encoding="utf-8", newline="")
+		except OSError as exc:
+			parser.error(f"cannot save output to {str(output_path)!r}: {exc}")
+	sys.stdout.write(output)
+	return 1 if any(
+		"error" in result
+		or result.get("availability") == "DOWN"
+		or (mode == "status" and result.get("ssl") != "VALID")
+		for result in results
+	) else 0
+
+
+if __name__ == "__main__":
+	raise SystemExit(main())
