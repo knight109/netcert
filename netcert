@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
 			"  netcert --ip -u example.com\n"
 			"  netcert --ip4 -u example.com\n"
 			"  netcert --ip6 -u example.com\n"
+			"  netcert -i -l sites.txt --ip4 --save ips.txt\n"
 			"  netcert -a -l sites.txt --json\n"
 			"  netcert --dns -l sites.txt --save dns.json --json\n"
 			"  netcert --subdomains -u example.com --save\n"
@@ -49,15 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
 	targets.add_argument("-u", "--url", metavar="URL", help="one URL or domain")
 	targets.add_argument("-l", "--list", metavar="FILE", help="file with one target per line")
 
-	functions = parser.add_mutually_exclusive_group(required=True)
+	functions = parser.add_mutually_exclusive_group()
 	functions.add_argument("-i", "--ip", action="store_true", help="resolve and show IPv4 and IPv6 addresses")
-	functions.add_argument("--ip4", action="store_true", help="show only IPv4 addresses")
-	functions.add_argument("--ip6", action="store_true", help="show only IPv6 addresses")
 	functions.add_argument("-a", "--availability", action="store_true", help="check whether the website responds")
 	functions.add_argument("--dns", action="store_true", help="show resolved addresses, canonical name, and PTR names")
 	functions.add_argument("--subdomains", action="store_true", help="find known subdomains in public Certificate Transparency logs")
 	functions.add_argument("--ssl", action="store_true", help="collect peer certificates as PEM files")
 	functions.add_argument("--status", action="store_true", help="show IP, availability, and SSL health")
+	parser.add_argument("--ip4", action="store_true", help="limit --ip to IPv4 (also selects IP lookup by itself)")
+	parser.add_argument("--ip6", action="store_true", help="limit --ip to IPv6 (also selects IP lookup by itself)")
 
 	parser.add_argument("--store", metavar="DIRECTORY", help="directory for collected SSL certificate files")
 	parser.add_argument("--summary", action="store_true", help="write one summary.txt in the certificate directory")
@@ -445,11 +446,26 @@ def format_output(mode: str, output_format: str, results: list[dict[str, Any]]) 
 	return format_text(mode, results)
 
 
+def target_succeeded(mode: str, result: dict[str, Any]) -> bool:
+	return not (
+		"error" in result
+		or result.get("availability") == "DOWN"
+		or (mode == "status" and result.get("ssl") != "VALID")
+	)
+
+
 def main(argv: list[str] | None = None) -> int:
 	parser = build_parser()
 	args = parser.parse_args(argv)
+	if args.ip4 and args.ip6:
+		parser.error("--ip4 and --ip6 cannot be combined. Example: netcert -i --ip4 -u example.com")
+	other_functions = args.availability or args.dns or args.subdomains or args.ssl or args.status
+	if (args.ip4 or args.ip6) and other_functions:
+		parser.error("--ip4/--ip6 only apply to IP lookup. Example: netcert -i --ip4 -u example.com")
+	if not (args.ip or args.ip4 or args.ip6 or other_functions):
+		parser.error("select a function. Example: netcert --ip -u example.com")
 	mode = (
-		"ip" if args.ip else "ip4" if args.ip4 else "ip6" if args.ip6
+		"ip4" if args.ip4 else "ip6" if args.ip6 else "ip" if args.ip
 		else "availability" if args.availability else "dns" if args.dns
 		else "subdomains" if args.subdomains else "ssl" if args.ssl else "status"
 	)
@@ -474,10 +490,29 @@ def main(argv: list[str] | None = None) -> int:
 			parser.error(f"cannot create certificate directory {str(store)!r}: {exc}")
 
 	results: list[dict[str, Any]] = []
+	success_count = 0
+	failed_targets: list[str] = []
+	if args.list:
+		print(f"0/{len(targets)} success", end="", file=sys.stderr, flush=True)
 	for index, target in enumerate(targets, start=1):
-		print(f"[{index}/{len(targets)}] Checking {target['target']}...", end="", file=sys.stderr, flush=True)
-		results.append(run_target(mode, target, store))
-		print(" done", file=sys.stderr, flush=True)
+		if args.list:
+			result = run_target(mode, target, store)
+			results.append(result)
+			if target_succeeded(mode, result):
+				success_count += 1
+			else:
+				failed_targets.append(target["target"])
+			print(f"\r{success_count}/{len(targets)} success", end="", file=sys.stderr, flush=True)
+		else:
+			print(f"[{index}/{len(targets)}] Checking {target['target']}...", end="", file=sys.stderr, flush=True)
+			results.append(run_target(mode, target, store))
+			print(" done", file=sys.stderr, flush=True)
+	if args.list:
+		print(file=sys.stderr)
+		if failed_targets:
+			print(f"{len(failed_targets)} failed:", file=sys.stderr)
+			for failed_target in failed_targets:
+				print(failed_target, file=sys.stderr)
 	if args.summary:
 		assert store is not None
 		summary = "".join(
@@ -499,12 +534,7 @@ def main(argv: list[str] | None = None) -> int:
 		except OSError as exc:
 			parser.error(f"cannot save output to {str(output_path)!r}: {exc}")
 	sys.stdout.write(output)
-	return 1 if any(
-		"error" in result
-		or result.get("availability") == "DOWN"
-		or (mode == "status" and result.get("ssl") != "VALID")
-		for result in results
-	) else 0
+	return 1 if any(not target_succeeded(mode, result) for result in results) else 0
 
 
 if __name__ == "__main__":
